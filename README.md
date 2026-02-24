@@ -1,1 +1,1 @@
-# PS2-control-m3519-car
+# IYSEC_2026_Robotics_Challenge
