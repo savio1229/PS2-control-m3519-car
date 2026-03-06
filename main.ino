@@ -1,63 +1,11 @@
-/*
-
-  請先安裝PS2X函式庫，網址：
-  https://github.com/madsci1016/Arduino-PS2X
-  
-*/
-
-
-#include <PS2X_lib.h>  //for v1.6
-
-/******************************************************************
- * set pins connected to PS2 controller:
- *   - 1e column: original 
- *   - 2e colmun: Stef?
- * replace pin numbers by the ones you use
- ******************************************************************/
-#define PS2_DAT        13  //14    
-#define PS2_CMD        11  //15
-#define PS2_SEL        10  //16
-#define PS2_CLK        12  //17
-
-/******************************************************************
- * select modes of PS2 controller:
- *   - pressures = analog reading of push-butttons 
- *   - rumble    = motor rumbling
- * uncomment 1 of the lines for each mode selection
- ******************************************************************/
-//#define pressures   true
-#define pressures   false
-//#define rumble      true
-#define rumble      false
-
-PS2X ps2x; // create PS2 Controller Class
-
-//right now, the library does NOT support hot pluggable controllers, meaning 
-//you must always either restart your Arduino after you connect the controller, 
-//or call config_gamepad(pins) again after connecting the controller.
-
-int error = 0;
-byte type = 0;
-byte vibrate = 0;
-
-
-void initPS2(){
-  //配對接收器 
-  do { 
-    //GamePad(clock, command, attention, data, Pressures?, Rumble?)
-    error = ps2x.config_gamepad(PS2_CLK, PS2_CMD, PS2_SEL, PS2_DAT, pressures, rumble);//這行要和接線對應正確
-    if (error == 0) { Serial.print("Gamepad found!");break; } 
-    else { delay(100); } 
-  } while (1); 
-}
-
-
 #include <Usb.h>
 #include <cdcacm.h>
 #include <usbhub.h>
+#include <PS2X_lib.h>
 
-// ============ USB Host / CDC 初始化 ============
+// ====================== USB Host / 馬達控制 ======================
 USB Usb;
+
 class ACMAsyncOper : public CDCAsyncOper {
 public:
   uint8_t OnInit(ACM *pacm) override { return 0; }
@@ -66,29 +14,27 @@ ACMAsyncOper AsyncOper;
 ACM Acm(&Usb, &AsyncOper);
 bool deviceReady = false;
 
-// ============ 馬達 / 協議參數 ============
-// 馬達的 CAN SlaveID
+// 馬達 CAN SlaveID
 const uint16_t MOTOR_SLAVE_ID1 = 0x01;
 const uint16_t MOTOR_SLAVE_ID2 = 0x02;
 const uint16_t MOTOR_SLAVE_ID3 = 0x03;
 const uint16_t MOTOR_SLAVE_ID4 = 0x04;
-// 速度模式下的 motor_id = 0x200 + SlaveID（對應 control_Vel）
+// 速度模式 ID = 0x200 + SlaveID
 const uint16_t MOTOR_ID_VEL_BASE = 0x200;
 // 串口 921600, 8N1
 const uint32_t UART_BAUD = 921600;
 // RPM 上限（防呆）
 const float RPM_MAX = 395.0f;
 
-// ============ send_data_frame 模板（照 DM_CAN.MotorControl）===========
+// send_data_frame 模板
 uint8_t send_data_frame_template[30] = {
   0x55, 0xAA, 0x1e, 0x03, 0x01, 0x00, 0x00, 0x00, 0x0a, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
-// ============ 工具：RPM→rad/s、float→4bytes 小端 ============
 float rpm_to_rad(float rpm) {
-  return rpm * 0.1047197551f;   // m3519_run.py 同樣係數
+  return rpm * 0.1047197551f;
 }
 
 void f32_to_bytes_le(float f, uint8_t out[4]) {
@@ -100,13 +46,11 @@ void f32_to_bytes_le(float f, uint8_t out[4]) {
   out[3] = (uint8_t)((v.u >> 24) & 0xFF);
 }
 
-// ============ USB 串口 I/O 封裝 ============
 void usbSerialWrite(const uint8_t *buf, uint16_t len) {
   if (!deviceReady) return;
   Acm.SndData(len, const_cast<uint8_t*>(buf));
 }
 
-// ============ 等價 Python 的 __send_data(motor_id, data) ============
 void sendFrameToMotor(uint16_t motor_id, const uint8_t data[8]) {
   if (!deviceReady) return;
 
@@ -115,11 +59,11 @@ void sendFrameToMotor(uint16_t motor_id, const uint8_t data[8]) {
     frame[i] = send_data_frame_template[i];
   }
 
-  // send_data_frame[13/14] = motor_id
+  // motor_id
   frame[13] = (uint8_t)(motor_id & 0xFF);
   frame[14] = (uint8_t)((motor_id >> 8) & 0xFF);
 
-  // send_data_frame[21:29] = data
+  // data[0..7]
   for (uint8_t i = 0; i < 8; i++) {
     frame[21 + i] = data[i];
   }
@@ -127,10 +71,9 @@ void sendFrameToMotor(uint16_t motor_id, const uint8_t data[8]) {
   usbSerialWrite(frame, 30);
 }
 
-// ============ 速度命令：等價 control_Vel + motor_run ============
 void buildVelData(float rpm, uint8_t data[8]) {
-  if (rpm >  RPM_MAX) rpm  =  RPM_MAX;
-  if (rpm < -RPM_MAX) rpm  = -RPM_MAX;
+  if (rpm >  RPM_MAX)  rpm =  RPM_MAX;
+  if (rpm < -RPM_MAX)  rpm = -RPM_MAX;
 
   float rad_s = rpm_to_rad(rpm);
   uint8_t v[4];
@@ -146,19 +89,16 @@ void buildVelData(float rpm, uint8_t data[8]) {
   data[7] = 0;
 }
 
-// 傳入「電機 SlaveID」和「RPM」
 void sendVelCommand(uint16_t slaveId, float rpm) {
   Usb.Task();               // 維持 USB Host 狀態
   if (!deviceReady) return;
 
   uint16_t motor_id = MOTOR_ID_VEL_BASE + slaveId;   // 0x200 + SlaveID
-
   uint8_t data[8];
   buildVelData(rpm, data);
   sendFrameToMotor(motor_id, data);
 }
 
-// ============ 使能與失能（等價 enable / disable） ============
 void send_Enable(uint16_t slaveId) {
   Usb.Task();
   if (!deviceReady) return;
@@ -173,142 +113,156 @@ void send_disable(uint16_t slaveId) {
   sendFrameToMotor(slaveId, data);
 }
 
-// ============ 馬達與 USB 的初始化打包成一個函數 ============
 void initMotor() {
-  // 初始化 USB Host
   if (Usb.Init() == -1) {
-    while (1) {}   // 失敗就卡死
+    while (1) {}   // 失敗卡死
   }
 
-  // 等 USB‑CAN 枚舉完成（CDC ready）
   while (!Acm.isReady()) {
     Usb.Task();
   }
   deviceReady = true;
 
-  // 設定虛擬串口 921600, 8N1
   LINE_CODING lc;
   lc.dwDTERate = UART_BAUD;
   lc.bCharFormat = 0;
   lc.bParityType = 0;
   lc.bDataBits   = 8;
   Acm.SetLineCoding(&lc);
-  delay(100);                // 給 USB‑CAN / 馬達一點時間穩定
+
+  delay(100);
 }
 
-//Line-following sensor seting
-int left_sensor_pin = 9;
-int right_sensor_pin = 8;
+// ====================== PS2 控制器 ======================
+#define PS2_DAT  4   // 任一數位腳，避開 10~13
+#define PS2_CMD  5
+#define PS2_SEL  6
+#define PS2_CLK  7
 
-void init_Line_following_sensor(){
-  pinMode(left_sensor_pin,INPUT);
-  pinMode(right_sensor_pin,INPUT);
+#define pressures false
+#define rumble    false
+
+PS2X ps2x;
+int  error = 0;
+byte type  = 0;
+byte vibrate = 0;
+
+void initps2(){
+  // 2. 初始化 PS2 控制器
+  delay(300);
+  error = ps2x.config_gamepad(PS2_CLK, PS2_CMD, PS2_SEL, PS2_DAT, pressures, rumble);
+  type  = ps2x.readType();
+
+  if (error != 0) {
+    Serial.println("PS2 controller init failed");
+  } else {
+    Serial.println("PS2 controller ready");
+  }
 }
 
+void ws() {
+  if (error != 0) {
+    // 沒有偵測到手把就不要動馬達
+    sendVelCommand(MOTOR_SLAVE_ID1, 0.0f);
+    sendVelCommand(MOTOR_SLAVE_ID2, 0.0f);
+    delay(100);
+    return;
+  }
 
+  // 注意：read_gamepad 已經在 loop() 裡呼叫過了，這裡不要再呼叫
+
+  // 左搖桿
+  int ly = ps2x.Analog(PSS_LY);  // 左：前進/後退
+  int lx = ps2x.Analog(PSS_LX);  // 左：左右旋轉
+  // 右搖桿
+  int ry = ps2x.Analog(PSS_RY);  // 右：前進/後退
+  int rx = ps2x.Analog(PSS_RX);  // 右：左右旋轉
+
+  const int center   = 128;
+  const int deadzone = 5;
+
+  // ------- 左搖桿的 fwdL / spinL -------
+  int vyL = center - ly;      // 往上推 = 正值（前進）
+  int vxL = lx - center;      // 往右推 = 正值（右轉）
+  if (abs(vyL) < deadzone) vyL = 0;
+  if (abs(vxL) < deadzone) vxL = 0;
+
+  // ------- 右搖桿的 fwdR / spinR -------
+  int vyR = center - ry;      // 往上推 = 正值（前進）
+  int vxR = rx - center;      // 往右推 = 正值（右轉）
+  if (abs(vyR) < deadzone) vyR = 0;
+  if (abs(vxR) < deadzone) vxR = 0;
+
+  // ------- 兩支搖桿數值疊加 -------
+  int vy = vyL + vyR;         // 前進/後退總量
+  int vx = vxL + vxR;         // 自轉總量
+
+  // 限制在單搖桿範圍內，避免超過 127
+  if (vy >  127) vy =  127;
+  if (vy < -127) vy = -127;
+  if (vx >  127) vx =  127;
+  if (vx < -127) vx = -127;
+
+  // ------- 映射到 -100 ~ +100 RPM -------
+  float fwd  = (float)vy / 127.0f * 390.0f;  // 前進/後退分量
+  float spin = (float)vx / 127.0f * 390.0f;  // 自轉分量
+
+  // 差速混合
+  float rpm1 = fwd + spin;
+  float rpm2 = -fwd + spin;
+
+  // 安全限制在 -100 ~ +100 RPM
+  if (rpm1 >  100.0f) rpm1 =  390.0f;
+  if (rpm1 < -100.0f) rpm1 = -390.0f;
+  if (rpm2 >  100.0f) rpm2 =  390.0f;
+  if (rpm2 < -100.0f) rpm2 = -390.0f;
+
+  // 送給馬達
+  sendVelCommand(MOTOR_SLAVE_ID1, rpm1);
+  sendVelCommand(MOTOR_SLAVE_ID2, rpm2);
+
+  // 除錯輸出
+  Serial.print("LY="); Serial.print(ly);
+  Serial.print(" LX="); Serial.print(lx);
+  Serial.print("  RY="); Serial.print(ry);
+  Serial.print(" RX="); Serial.print(rx);
+  Serial.print("  rpm1="); Serial.print(rpm1);
+  Serial.print(" rpm2="); Serial.println(rpm2);
+
+  delay(20);  // 更新頻率約 50 Hz
+}
+// ====================== setup / loop ======================
 void setup() {
   Serial.begin(115200);
-  //配對接收器 
-  initPS2();
-  initMotor();   // 所有馬達 setup 都包在這一行
-  send_Enable(MOTOR_SLAVE_ID1);
+
+  // 1. 初始化馬達 (USB-CAN)
+  initMotor();
+  send_Enable(MOTOR_SLAVE_ID1);   // 上電後使能一次即可
   send_Enable(MOTOR_SLAVE_ID2);
-  send_Enable(MOTOR_SLAVE_ID3);
-  send_Enable(MOTOR_SLAVE_ID4);
-  init_Line_following_sensor();
+
+  // 2. 初始化 PS2 控制器
+  initps2();
 }
-void loop(){
-  ps2x.read_gamepad(false, 0);  //讀取手把狀態 
 
-  int vel_motor_ID1 = map((ps2x.Analog(PSS_LY) + ps2x.Analog(PSS_LX)) + (ps2x.Analog(PSS_RY) + ps2x.Analog(PSS_RX)), 255, 0, -100, 100);
-  int vel_motor_ID2 = map((ps2x.Analog(PSS_LY) - ps2x.Analog(PSS_LX)) + (ps2x.Analog(PSS_RY) - ps2x.Analog(PSS_RX)), 255, 0, -100, 100);
+void loop() {
 
-  sendVelCommand(MOTOR_SLAVE_ID1,vel_motor_ID1);
-  sendVelCommand(MOTOR_SLAVE_ID2,vel_motor_ID1 * -1);
+  // 讀取 PS2 狀態 (不啟動震動)
+  ps2x.read_gamepad(false, 0);
 
-  
-  //測試每一個按鈕和搖桿
-    if(ps2x.Button(PSB_START))         //Start鍵
-      Serial.println("Start is being held");
-    if(ps2x.Button(PSB_SELECT))       //Select鍵
-      Serial.println("Select is being held");      
+  ws();
 
-    if(ps2x.Button(PSB_PAD_UP)) {      //十字方向，上
-      Serial.print("Up held this hard: ");
-      Serial.println(ps2x.Analog(PSAB_PAD_UP), DEC);
-      while(!(digitalRead(right_sensor_pin)));
-      delay(200);
-      sendVelCommand(MOTOR_SLAVE_ID1,-10);//轉彎
-      sendVelCommand(MOTOR_SLAVE_ID2,-10);
-      delay(200);
-      sendVelCommand(MOTOR_SLAVE_ID1,10);//直行
-      sendVelCommand(MOTOR_SLAVE_ID2,-10);
-      while(!(digitalRead(left_sensor_pin)));
-      sendVelCommand(MOTOR_SLAVE_ID1,10);//轉彎
-      sendVelCommand(MOTOR_SLAVE_ID2,10);
-      delay(200);
-      sendVelCommand(MOTOR_SLAVE_ID1,10);//直行
-      sendVelCommand(MOTOR_SLAVE_ID2,10);
-      delay(200);
-      sendVelCommand(MOTOR_SLAVE_ID1,0);
-      sendVelCommand(MOTOR_SLAVE_ID2,0);
-
+    if(ps2x.ButtonPressed(PSB_CIRCLE)){
+      Serial.println("Circle just pressed");
+      send_Enable(MOTOR_SLAVE_ID3);
+      send_Enable(MOTOR_SLAVE_ID4);
+      sendVelCommand(MOTOR_SLAVE_ID3, -100.0f);
+      sendVelCommand(MOTOR_SLAVE_ID4, 100.0f);
     }
-    if(ps2x.Button(PSB_PAD_LEFT)){    //十字方向，左
-      Serial.print("LEFT held this hard: ");
-      Serial.println(ps2x.Analog(PSAB_PAD_LEFT), DEC);
-      sendVelCommand(MOTOR_SLAVE_ID1,10);
-      sendVelCommand(MOTOR_SLAVE_ID2,-10);
+    if(ps2x.ButtonPressed(PSB_TRIANGLE)){
+      Serial.println("Triangle pressed");
+      send_disable(MOTOR_SLAVE_ID3);
+      send_disable(MOTOR_SLAVE_ID4);
+      sendVelCommand(MOTOR_SLAVE_ID3, 0.0f);
+      sendVelCommand(MOTOR_SLAVE_ID4, 0.0f);
     }
-    if(ps2x.Button(PSB_PAD_RIGHT)){   //十字方向，右
-      Serial.print("Right held this hard: ");
-      Serial.println(ps2x.Analog(PSAB_PAD_RIGHT), DEC);
-      sendVelCommand(MOTOR_SLAVE_ID1,-10);
-      sendVelCommand(MOTOR_SLAVE_ID2,10);
-    }
-    if(ps2x.Button(PSB_PAD_DOWN)){    //十字方向，下
-      Serial.print("DOWN held this hard: ");
-      Serial.println(ps2x.Analog(PSAB_PAD_DOWN), DEC);
-    }
-    if(ps2x.NewButtonState(PSB_L3))   //L3鍵，NewButtonState按下不管多久只會觸發兩次(按下和放開)
-      Serial.println("L3 pressed");
-    if(ps2x.NewButtonState(PSB_R3))   //R3鍵
-      Serial.println("R3 pressed");
-    if(ps2x.NewButtonState(PSB_L2))   //L2鍵
-      Serial.println("L2 pressed");
-    if(ps2x.NewButtonState(PSB_R2))   //R2鍵
-      Serial.println("R2 pressed");
-    if(ps2x.NewButtonState(PSB_TRIANGLE))  //三角按鍵
-      Serial.println("Triangle pressed");        
-
-
-    if(ps2x.NewButtonState(PSB_CIRCLE)) { //圓型按鍵
-      Serial.println("Circle pressed");
-      sendVelCommand(MOTOR_SLAVE_ID3,100.0f);
-      sendVelCommand(MOTOR_SLAVE_ID4,-100.0f);
-    } else{
-      sendVelCommand(MOTOR_SLAVE_ID3,00.0f);
-      sendVelCommand(MOTOR_SLAVE_ID4,00.0f);
-    }
-
-
-    if(ps2x.NewButtonState(PSB_CROSS))    //X按鍵
-      Serial.println("X pressed");
-    if(ps2x.NewButtonState(PSB_SQUARE))   //方型按鍵
-      Serial.println("Square pressed");     
-
-    if(ps2x.Button(PSB_L1) || ps2x.Button(PSB_R1)) { //按下L1或L2鍵，顯示兩個香菇頭的數值
-      Serial.print("Stick Values:");
-      Serial.print(ps2x.Analog(PSS_LY), DEC);   //左，上下
-      Serial.print(",");
-      Serial.print(ps2x.Analog(PSS_LX), DEC);   //左，左右
-      Serial.print(",");
-      Serial.print(ps2x.Analog(PSS_RY), DEC);   //右，上下
-      Serial.print(",");
-      Serial.println(ps2x.Analog(PSS_RX), DEC); //右，左右
-    }  
-
-
-    
-  delay(10); 
 }
